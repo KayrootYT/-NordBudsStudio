@@ -3,15 +3,9 @@ name: Build Nord Buds Studio APK
 
 on:
   push:
-    branches:
-      - main
-      - master
-
+    branches: [main, master]
   pull_request:
-    branches:
-      - main
-      - master
-
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -19,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build Nord Buds Studio
     runs-on: ubuntu-22.04
 
     env:
@@ -27,30 +21,25 @@ jobs:
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
-      # 1. Download repository source
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Install Java 17
-      - name: Setup JDK 17
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Install Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
-      # 4. Configure Android SDK without requesting obsolete tools
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: ''
 
-      # 5. Install SDK packages and accept licenses
       - name: Install Android SDK Packages
         shell: bash
         run: |
@@ -60,29 +49,48 @@ jobs:
             -type f -name sdkmanager 2>/dev/null | head -n 1 || true)"
 
           if [ -z "$SDKMANAGER" ]; then
-            echo "::error::Android SDK sdkmanager not found"
+            echo "::error::sdkmanager not found"
             exit 1
           fi
 
-          echo "Using sdkmanager: $SDKMANAGER"
-
-          # Avoid failing the workflow when yes receives SIGPIPE.
           set +o pipefail
           yes | "$SDKMANAGER" --licenses || true
           set -o pipefail
 
-          # Install required Android SDK components.
           "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      # 6. Find project even if files are inside a subfolder
+      # Extract the ZIP committed to the repository
+      - name: Extract Android Project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="$GITHUB_WORKSPACE/NordBudsStudio.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "::error::NordBudsStudio.zip not found in repository root"
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f \
+              -not -path '*/.git/*' | sort
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/nordbuds-project"
+          unzip -oq "$ZIP_FILE" -d "$RUNNER_TEMP/nordbuds-project"
+
+          echo "ZIP extracted successfully."
+          find "$RUNNER_TEMP/nordbuds-project" \
+            -maxdepth 4 -type f | sort | head -150
+
+      # Find the actual Android project inside extracted files
       - name: Locate Android Project
         shell: bash
         run: |
           set -euo pipefail
 
+          SEARCH_DIR="$RUNNER_TEMP/nordbuds-project"
           PROJECT_DIR=""
 
           while IFS= read -r file; do
@@ -95,23 +103,20 @@ jobs:
               break
             fi
           done < <(
-            find . -type f -path '*/app/build.gradle' \
-              -not -path '*/.gradle/*' | sort
+            find "$SEARCH_DIR" -type f \
+              -path '*/app/build.gradle' | sort
           )
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::Android project files not found"
-
-            echo "Repository file listing:"
-            find . -maxdepth 7 -type f | sort | head -250
-
+            echo "::error::Android project not found inside ZIP"
+            echo "Expected settings.gradle, build.gradle and app/build.gradle."
+            find "$SEARCH_DIR" -maxdepth 8 -type f | sort
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Found Android project: $PROJECT_DIR"
+          echo "Android project found: $PROJECT_DIR"
 
-      # 7. Verify source files
       - name: Verify Project Files
         shell: bash
         run: |
@@ -125,21 +130,17 @@ jobs:
           test -f "$PROJECT_DIR/app/src/main/java/com/kayroot/nordbudsstudio/MainActivity.java"
           test -f "$PROJECT_DIR/app/src/main/res/layout/activity_main.xml"
 
-          echo "All required project files found."
+          echo "All project files verified."
 
-      # 8. Compile Android project
       - name: Build Debug APK
         shell: bash
         run: |
           set -euo pipefail
 
-          gradle \
-            --no-daemon \
-            --stacktrace \
+          gradle --no-daemon --stacktrace \
             -p "$PROJECT_DIR" \
             clean assembleDebug
 
-      # 9. Confirm APK exists
       - name: Verify APK
         shell: bash
         run: |
@@ -148,18 +149,18 @@ jobs:
           APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           if [ ! -s "$APK" ]; then
-            echo "::error::APK was not generated"
+            echo "::error::APK file was not generated"
             exit 1
           fi
 
-          echo "APK build successful"
           ls -lh "$APK"
+          echo "APK generated successfully."
 
-      # 10. Upload APK to GitHub Actions artifacts
-      - name: Upload Debug APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: NordBudsStudio-debug-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+          
