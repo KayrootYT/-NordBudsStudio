@@ -3,13 +3,9 @@ name: Build Nord Buds Studio APK
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   workflow_dispatch:
 
 permissions:
@@ -17,7 +13,6 @@ permissions:
 
 jobs:
   build:
-    name: Build Android 16 APK
     runs-on: ubuntu-latest
 
     env:
@@ -39,9 +34,6 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
-      # Important: packages must be empty.
-      # This prevents the action from requesting
-      # the obsolete Android SDK package named "tools".
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
@@ -56,43 +48,79 @@ jobs:
             -type f -name sdkmanager 2>/dev/null | head -n 1)"
 
           if [ -z "$SDKMANAGER" ]; then
-            echo "::error::Android SDK sdkmanager was not found."
+            echo "::error::sdkmanager not found"
             exit 1
           fi
-
-          echo "Using sdkmanager: $SDKMANAGER"
-
-          yes | "$SDKMANAGER" --licenses \
-            || echo "Some licenses may already be accepted."
 
           "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Verify Project Structure
+          yes | "$SDKMANAGER" --licenses
+
+      - name: Locate Android Project
+        shell: bash
         run: |
-          test -f settings.gradle
-          test -f build.gradle
-          test -f app/build.gradle
-          test -f app/src/main/AndroidManifest.xml
-          test -f app/src/main/java/com/kayroot/nordbudsstudio/MainActivity.java
+          set -euo pipefail
+
+          PROJECT_DIR=""
+
+          while IFS= read -r file; do
+            candidate="${file%/app/build.gradle}"
+
+            if [ -f "$candidate/settings.gradle" ] &&
+               [ -f "$candidate/build.gradle" ] &&
+               [ -f "$candidate/app/src/main/AndroidManifest.xml" ]; then
+              PROJECT_DIR="$candidate"
+              break
+            fi
+          done < <(find . -type f -path '*/app/build.gradle' \
+            -not -path '*/.gradle/*' | sort)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "::error::Android project files not found."
+            echo "Repository file listing:"
+            find . -maxdepth 5 -type f | sort | head -200
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Android project found at: $PROJECT_DIR"
+
+          test -f "$PROJECT_DIR/settings.gradle"
+          test -f "$PROJECT_DIR/build.gradle"
+          test -f "$PROJECT_DIR/app/build.gradle"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
+      - name: Verify MainActivity
+        shell: bash
+        run: |
+          set -euo pipefail
+          find "$PROJECT_DIR/app/src/main" \
+            -type f -name 'MainActivity.java' -print -quit |
+            grep -q .
+          echo "MainActivity.java found."
 
       - name: Build Debug APK
-        run: gradle --no-daemon clean assembleDebug
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon clean assembleDebug
 
       - name: Verify APK
+        shell: bash
         run: |
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
-          echo "APK build successful"
-          ls -lh "$APK"
+          set -euo pipefail
+          test -s "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          ls -lh "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: NordBudsStudio-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: "**/app/build/outputs/apk/debug/app-debug.apk"
           if-no-files-found: error
           retention-days: 14
           
