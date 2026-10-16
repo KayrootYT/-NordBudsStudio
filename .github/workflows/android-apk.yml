@@ -1,3 +1,4 @@
+
 name: Build Nord Buds Studio APK
 
 on:
@@ -16,8 +17,12 @@ permissions:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build Android 16 APK
     runs-on: ubuntu-latest
+
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       - name: Checkout Repository
@@ -34,25 +39,44 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
+      # Important: packages must be empty.
+      # This prevents the action from requesting
+      # the obsolete Android SDK package named "tools".
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: ""
 
       - name: Install Android SDK Packages
+        shell: bash
         run: |
-          sdkmanager --install \
+          set -euo pipefail
+
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f -name sdkmanager 2>/dev/null | head -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::Android SDK sdkmanager was not found."
+            exit 1
+          fi
+
+          echo "Using sdkmanager: $SDKMANAGER"
+
+          yes | "$SDKMANAGER" --licenses \
+            || echo "Some licenses may already be accepted."
+
+          "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
-          yes | sdkmanager --licenses
 
-      - name: Verify Project Files
+      - name: Verify Project Structure
         run: |
           test -f settings.gradle
           test -f build.gradle
           test -f app/build.gradle
           test -f app/src/main/AndroidManifest.xml
           test -f app/src/main/java/com/kayroot/nordbudsstudio/MainActivity.java
-          echo "Project files verified."
 
       - name: Build Debug APK
         run: gradle --no-daemon clean assembleDebug
@@ -61,9 +85,10 @@ jobs:
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
+          echo "APK build successful"
           ls -lh "$APK"
 
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: NordBudsStudio-debug-apk
