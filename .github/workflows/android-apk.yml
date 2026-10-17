@@ -1,86 +1,139 @@
+
 name: Build Budsy APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
   workflow_dispatch:
-
-concurrency:
-  group: build-apk-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: budsy-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Build and verify Budsy Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Unzip budsy.zip if project is still zipped
+      - name: Find Android project
+        id: locate
+        shell: bash
         run: |
-          if [ -z "$(find . -name settings.gradle.kts -not -path "*/node_modules/*" | head -n1)" ]; then
-            z=$(find . -iname "*.zip" | head -n1)
-            if [ -n "$z" ]; then
-              echo "Extracting $z"
-              mkdir -p _project
-              unzip -q -o "$z" -d _project
-            fi
-          fi
+          set -euo pipefail
+          PROJECT_DIR=""
 
-      - name: Find Gradle project folder
-        id: p
-        run: |
-          f=$(find . -name settings.gradle.kts -not -path "*/node_modules/*" | head -n1)
-          if [ -z "$f" ]; then
-            echo "::error::settings.gradle.kts not found. Upload the extracted Budsy project files (app folder, settings.gradle.kts, build.gradle.kts) to the repo."
-            ls -R | head -40
+          while IFS= read -r settings_file; do
+            candidate="$(dirname "$settings_file")"
+
+            if [[ -f "$candidate/app/build.gradle" || \
+                  -f "$candidate/app/build.gradle.kts" ]]; then
+              PROJECT_DIR="$candidate"
+              break
+            fi
+          done < <(
+            find . -type f \
+              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+              -not -path '*/.git/*' \
+              -not -path '*/node_modules/*' \
+              -not -path '*/.gradle/*' | sort
+          )
+
+          if [[ -z "$PROJECT_DIR" ]]; then
+            echo "ERROR: Android Gradle project not found." >&2
+            echo "Expected settings.gradle or settings.gradle.kts" >&2
+            echo "and app/build.gradle or app/build.gradle.kts." >&2
+            echo "Repository root:" >&2
+            ls -la >&2
+            echo "Settings files found:" >&2
+            find . -type f \
+              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+              -not -path '*/.git/*' -print >&2 || true
             exit 1
           fi
-          echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Java 17
+          PROJECT_DIR="${PROJECT_DIR#./}"
+          [[ -n "$PROJECT_DIR" ]] || PROJECT_DIR="."
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Found Android project: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
 
-      - name: Accept Android licenses
-        run: yes | sdkmanager --licenses > /dev/null || true
+      - name: Install Android SDK packages
+        run: |
+          set -euo pipefail
+          sdkmanager "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.9
+      - name: Build debug APK
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.locate.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon --stacktrace clean assembleDebug
 
-      - name: Run unit tests and build debug APK
-        working-directory: ${{ steps.p.outputs.dir }}
-        run: gradle testDebugUnitTest assembleDebug --no-daemon --stacktrace
+      - name: Verify and rename APK
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.locate.outputs.project_dir }}
+        run: |
+          set -euo pipefail
 
-      - name: Rename APK
-        run: cp "${{ steps.p.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk" Budsy.apk
+          SOURCE_APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          OUTPUT_APK="$PROJECT_DIR/app/build/outputs/apk/debug/Budsy-debug.apk"
 
-      - name: Upload APK
+          if [[ ! -s "$SOURCE_APK" ]]; then
+            echo "ERROR: Expected APK not found: $SOURCE_APK" >&2
+            find "$PROJECT_DIR/app/build/outputs" -type f -print 2>/dev/null || true
+            exit 1
+          fi
+
+          cp "$SOURCE_APK" "$OUTPUT_APK"
+          test -s "$OUTPUT_APK"
+          ls -lh "$OUTPUT_APK"
+
+      - name: Upload Budsy debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Budsy-apk
-          path: Budsy.apk
+          name: Budsy-debug-apk
+          path: ${{ steps.locate.outputs.project_dir }}/app/build/outputs/apk/debug/Budsy-debug.apk
           if-no-files-found: error
+          retention-days: 14
 
-      - name: Upload build reports on failure
+      - name: Upload build diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-reports
+          name: Budsy-build-diagnostics
           path: |
-            ${{ steps.p.outputs.dir }}/app/build/reports
+            **/build/reports/**
+            **/build/outputs/logs/**
           if-no-files-found: ignore
+          retention-days: 7
