@@ -1,45 +1,144 @@
 name: Build Budsy APK
+
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+push:
+branches: [main]
+pull_request:
+branches: [main]
+workflow_dispatch:
+
+permissions:
+contents: read
+
+concurrency:
+group: budsy-build-${{ github.ref }}
+cancel-in-progress: true
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Unzip project if it was uploaded as a zip
-        run: |
-          for z in $(find . -maxdepth 2 -iname "*.zip" -not -path "./.git/*"); do
-            echo "Extracting $z"
-            unzip -q -o "$z" -d project_from_zip
-          done
-          true
-      - name: Find Gradle project folder
-        id: p
-        run: |
-          f=$(find . -name settings.gradle.kts -not -path "*/node_modules/*" | head -n1)
-          if [ -z "$f" ]; then
-            echo "::error::settings.gradle.kts not found. Upload the Budsy project files (app folder, settings.gradle.kts, build.gradle.kts) to the repo."
-            ls -R | head -40
-            exit 1
-          fi
-          echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - name: Accept Android licenses
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.9
-      - name: Build debug APK
-        working-directory: ${{ steps.p.outputs.dir }}
-        run: gradle assembleDebug --no-daemon
-      - name: Rename APK
-        run: cp "${{ steps.p.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk" Budsy.apk
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Budsy-apk
-          path: Budsy.apk
+build:
+name: Build and Verify Android APK
+runs-on: ubuntu-latest
+timeout-minutes: 30
+
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
+
+  - name: Set up Java 17
+    uses: actions/setup-java@v4
+    with:
+      distribution: temurin
+      java-version: '17'
+
+  - name: Set up Android SDK
+    uses: android-actions/setup-android@v3
+
+  - name: Install Android SDK packages
+    shell: bash
+    run: |
+      set -euo pipefail
+      sdkmanager --licenses || true
+      sdkmanager \
+        "platform-tools" \
+        "platforms;android-35" \
+        "build-tools;35.0.0"
+
+  - name: Find Budsy Gradle project
+    id: project
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      PROJECT_DIR="."
+
+      if [ ! -f "$PROJECT_DIR/settings.gradle.kts" ] && \
+         [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
+        SETTINGS_FILE="$(find . \
+          -type f \( -name settings.gradle.kts -o -name settings.gradle \) \
+          -not -path '*/.git/*' \
+          -not -path '*/build/*' \
+          -print -quit)"
+
+        if [ -z "$SETTINGS_FILE" ]; then
+          echo "::error::Gradle settings file not found."
+          exit 1
+        fi
+
+        PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+      fi
+
+      if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ] && \
+         [ ! -f "$PROJECT_DIR/app/build.gradle" ]; then
+        echo "::error::App Gradle build file not found."
+        find "$PROJECT_DIR" -maxdepth 4 -type f | sort | head -n 200
+        exit 1
+      fi
+
+      echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+  - name: Set up Gradle
+    uses: gradle/actions/setup-gradle@v4
+    with:
+      gradle-version: '8.9'
+
+  - name: Verify Java and Gradle
+    working-directory: ${{ steps.project.outputs.dir }}
+    shell: bash
+    run: |
+      set -euo pipefail
+      java -version
+      gradle --version
+      gradle tasks --no-daemon
+
+  - name: Build debug APK
+    working-directory: ${{ steps.project.outputs.dir }}
+    shell: bash
+    run: |
+      set -euo pipefail
+      gradle --no-daemon --stacktrace clean assembleDebug
+
+  - name: Verify and rename APK
+    id: verify
+    working-directory: ${{ steps.project.outputs.dir }}
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      APK="$(find app/build/outputs/apk \
+        -type f -name '*.apk' \
+        -path '*/debug/*' \
+        -print -quit)"
+
+      if [ -z "$APK" ] || [ ! -s "$APK" ]; then
+        echo "::error::Debug APK was not generated."
+        find app/build/outputs -type f 2>/dev/null || true
+        exit 1
+      fi
+
+      mkdir -p "$RUNNER_TEMP/budsy-artifact"
+      cp "$APK" "$RUNNER_TEMP/budsy-artifact/Budsy-debug.apk"
+
+      sha256sum "$RUNNER_TEMP/budsy-artifact/Budsy-debug.apk" \
+        > "$RUNNER_TEMP/budsy-artifact/SHA256SUMS.txt"
+
+      echo "APK successfully generated."
+      ls -lh "$RUNNER_TEMP/budsy-artifact/"
+
+  - name: Upload Budsy APK
+    uses: actions/upload-artifact@v4
+    with:
+      name: Budsy-APK
+      path: ${{ runner.temp }}/budsy-artifact/*
+      if-no-files-found: error
+      retention-days: 14
+
+  - name: Save build diagnostics
+    if: failure()
+    uses: actions/upload-artifact@v4
+    with:
+      name: Budsy-build-diagnostics
+      path: |
+        **/build/reports/
+        **/build/test-results/
+      if-no-files-found: ignore
+      retention-days: 7
