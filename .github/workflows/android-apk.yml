@@ -62,9 +62,9 @@ jobs:
         with:
           gradle-version: 8.9
 
-      - name: Build debug APK
+      - name: Run unit tests and build debug APK
         working-directory: ${{ steps.p.outputs.dir }}
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: gradle testDebugUnitTest assembleDebug --no-daemon --stacktrace
 
       - name: Rename APK
         run: cp "${{ steps.p.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk" Budsy.apk
