@@ -8,6 +8,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Unzip project if it was uploaded as a zip
+        run: |
+          for z in $(find . -maxdepth 2 -iname "*.zip" -not -path "./.git/*"); do
+            echo "Extracting $z"
+            unzip -q -o "$z" -d project_from_zip
+          done
+          true
       - name: Find Gradle project folder
         id: p
         run: |
