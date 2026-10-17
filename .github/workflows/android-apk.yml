@@ -21,12 +21,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Unzip budsy.zip if project is still zipped
+        run: |
+          if [ -z "$(find . -name settings.gradle.kts -not -path "*/node_modules/*" | head -n1)" ]; then
+            z=$(find . -iname "*.zip" | head -n1)
+            if [ -n "$z" ]; then
+              echo "Extracting $z"
+              mkdir -p _project
+              unzip -q -o "$z" -d _project
+            fi
+          fi
+
       - name: Find Gradle project folder
         id: p
         run: |
           f=$(find . -name settings.gradle.kts -not -path "*/node_modules/*" | head -n1)
           if [ -z "$f" ]; then
-            echo "::error::settings.gradle.kts not found. Upload the Budsy project files (app folder, settings.gradle.kts, build.gradle.kts) to the repo."
+            echo "::error::settings.gradle.kts not found. Upload the extracted Budsy project files (app folder, settings.gradle.kts, build.gradle.kts) to the repo."
             ls -R | head -40
             exit 1
           fi
