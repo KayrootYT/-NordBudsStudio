@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   build:
-    name: Build Budsy APK
+    name: Build and verify Budsy Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -25,65 +25,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract and locate Android project
-        id: locate
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # Extract the uploaded Budsy.zip into a temporary directory.
-          if [[ -f "Budsy.zip" ]]; then
-            mkdir -p "$RUNNER_TEMP/budsy-extracted"
-            unzip -oq "Budsy.zip" -d "$RUNNER_TEMP/budsy-extracted"
-          fi
-
-          # Search repository and extracted ZIP for a Gradle Android project.
-          PROJECT_DIR=""
-
-          for ROOT in "$GITHUB_WORKSPACE" "$RUNNER_TEMP/budsy-extracted"; do
-            [[ -d "$ROOT" ]] || continue
-
-            while IFS= read -r SETTINGS; do
-              CANDIDATE="$(dirname "$SETTINGS")"
-
-              if [[ -f "$CANDIDATE/app/build.gradle" || \
-                    -f "$CANDIDATE/app/build.gradle.kts" ]]; then
-                PROJECT_DIR="$CANDIDATE"
-                break 2
-              fi
-            done < <(
-              find "$ROOT" -type f \
-                \( -name settings.gradle -o -name settings.gradle.kts \) \
-                -not -path '*/.git/*' \
-                -not -path '*/node_modules/*' \
-                -not -path '*/.gradle/*' | sort
-            )
-          done
-
-          if [[ -z "$PROJECT_DIR" ]]; then
-            echo "ERROR: Android Gradle project not found." >&2
-            echo "ZIP contents:" >&2
-            if [[ -f Budsy.zip ]]; then
-              unzip -l Budsy.zip >&2 || true
-            fi
-            echo "Gradle settings files:" >&2
-            find "$GITHUB_WORKSPACE" "$RUNNER_TEMP/budsy-extracted" \
-              -type f \( -name settings.gradle -o -name settings.gradle.kts \) \
-              -print 2>/dev/null || true
-            exit 1
-          fi
-
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Android project found: $PROJECT_DIR"
-          ls -la "$PROJECT_DIR"
-
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
@@ -94,65 +42,46 @@ jobs:
       - name: Install Android SDK packages
         run: |
           set -euo pipefail
-          sdkmanager "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Extract project
+        run: |
+          set -euo pipefail
+          test -s Budsy.zip
+          mkdir -p _budsy_extract
+          unzip -o Budsy.zip -d _budsy_extract
+          test -f _budsy_extract/settings.gradle
+          test -f _budsy_extract/app/build.gradle
 
       - name: Build debug APK
-        env:
-          PROJECT_DIR: ${{ steps.locate.outputs.project_dir }}
-        shell: bash
+        working-directory: _budsy_extract
+        run: gradle --no-daemon --stacktrace clean assembleDebug
+
+      - name: Verify and rename APK
         run: |
           set -euo pipefail
-          cd "$PROJECT_DIR"
-
-          if [[ -f gradlew ]]; then
-            chmod +x gradlew
-            ./gradlew --no-daemon --stacktrace clean assembleDebug
-          else
-            echo "No Gradle wrapper found; using Gradle 8.9."
-            gradle --version >/dev/null 2>&1 || {
-              echo "Gradle is not installed." >&2
-              exit 1
-            }
-            gradle --no-daemon --stacktrace clean assembleDebug
-          fi
-
-      - name: Verify APK
-        env:
-          PROJECT_DIR: ${{ steps.locate.outputs.project_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-
-          if [[ ! -s "$APK" ]]; then
-            echo "ERROR: APK was not generated: $APK" >&2
-            find "$PROJECT_DIR/app/build/outputs" -type f -print \
-              2>/dev/null || true
-            exit 1
-          fi
-
-          cp "$APK" "$RUNNER_TEMP/Budsy-debug.apk"
-          ls -lh "$RUNNER_TEMP/Budsy-debug.apk"
+          APK="_budsy_extract/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          cp "$APK" Budsy-debug.apk
+          test -s Budsy-debug.apk
+          sha256sum Budsy-debug.apk
+          ls -lh Budsy-debug.apk
 
       - name: Upload Budsy APK
         uses: actions/upload-artifact@v4
         with:
           name: Budsy-debug-apk
-          path: ${{ runner.temp }}/Budsy-debug.apk
+          path: Budsy-debug.apk
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload build reports on failure
+      - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Budsy-build-reports
+          name: Budsy-build-diagnostics
           path: |
-            **/build/reports/**
-            **/build/outputs/logs/**
+            _budsy_extract/**/build/reports/**
+            _budsy_extract/**/build/outputs/logs/**
           if-no-files-found: ignore
           retention-days: 7
-          
