@@ -1,87 +1,86 @@
-
-name: Build and verify Budsy Android APK
+name: Build Budsy APK
 
 on:
   push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
-concurrency:
-  group: budsy-build-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
-    name: Build and verify Budsy Android APK
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
+      - name: Unzip budsy.zip if project is still zipped
+        run: |
+          if [ -z "$(find . -name settings.gradle.kts -not -path "*/node_modules/*" | head -n1)" ]; then
+            z=$(find . -iname "*.zip" | head -n1)
+            if [ -n "$z" ]; then
+              echo "Extracting $z"
+              mkdir -p _project
+              unzip -q -o "$z" -d _project
+            fi
+          fi
+
+      - name: Find Gradle project folder
+        id: p
+        run: |
+          f=$(find . -name settings.gradle.kts -not -path "*/node_modules/*" | head -n1)
+          if [ -z "$f" ]; then
+            echo "::error::settings.gradle.kts not found. Upload the extracted Budsy project files (app folder, settings.gradle.kts, build.gradle.kts) to the repo."
+            ls -R | head -40
+            exit 1
+          fi
+          echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
-
-      - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
+          java-version: 17
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
 
-      - name: Install Android SDK packages
-        run: |
-          set -euo pipefail
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses > /dev/null || true
 
-      - name: Extract project
-        run: |
-          set -euo pipefail
-          test -s Budsy.zip
-          mkdir -p _budsy_extract
-          unzip -o Budsy.zip -d _budsy_extract
-          test -f _budsy_extract/settings.gradle
-          test -f _budsy_extract/app/build.gradle
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
 
       - name: Build debug APK
-        working-directory: _budsy_extract
-        run: gradle --no-daemon --stacktrace clean assembleDebug
+        working-directory: ${{ steps.p.outputs.dir }}
+        run: gradle assembleDebug --no-daemon --stacktrace
 
-      - name: Verify and rename APK
-        run: |
-          set -euo pipefail
-          APK="_budsy_extract/app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
-          cp "$APK" Budsy-debug.apk
-          test -s Budsy-debug.apk
-          sha256sum Budsy-debug.apk
-          ls -lh Budsy-debug.apk
+      - name: Rename APK
+        run: cp "${{ steps.p.outputs.dir }}/app/build/outputs/apk/debug/app-debug.apk" Budsy.apk
 
-      - name: Upload Budsy APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Budsy-debug-apk
-          path: Budsy-debug.apk
+          name: Budsy-apk
+          path: Budsy.apk
           if-no-files-found: error
-          retention-days: 14
 
-      - name: Upload diagnostics on failure
+      - name: Upload build reports on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Budsy-build-diagnostics
+          name: build-reports
           path: |
-            _budsy_extract/**/build/reports/**
-            _budsy_extract/**/build/outputs/logs/**
+            ${{ steps.p.outputs.dir }}/app/build/reports
           if-no-files-found: ignore
-          retention-days: 7
