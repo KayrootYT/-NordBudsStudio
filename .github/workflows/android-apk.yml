@@ -43,6 +43,37 @@ jobs:
           fi
           echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
 
+      - name: Apply known Kotlin compile fixes
+        env:
+          PROJECT_DIR: ${{ steps.p.outputs.dir }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_DIR"])
+          fixes = {
+              root / "app/src/main/java/com/nordbuds/studio/MainActivity.kt":
+                  "import androidx.compose.animation.core.animateFloat",
+              root / "app/src/main/java/com/nordbuds/studio/Screens.kt":
+                  "import androidx.compose.foundation.border",
+          }
+          for path, import_line in fixes.items():
+              if not path.exists():
+                  raise SystemExit(f"Expected source file missing: {path}")
+              text = path.read_text()
+              if import_line not in text:
+                  lines = text.splitlines()
+                  package_idx = next((i for i, line in enumerate(lines) if line.startswith("package ")), None)
+                  if package_idx is None:
+                      raise SystemExit(f"Package declaration missing: {path}")
+                  lines.insert(package_idx + 2, import_line)
+                  path.write_text("\n".join(lines) + "\n")
+                  print(f"Applied: {path.name}: {import_line}")
+              else:
+                  print(f"Already present: {path.name}: {import_line}")
+          PY
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
